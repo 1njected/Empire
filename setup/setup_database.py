@@ -10,17 +10,25 @@ from Crypto.Random import random
 #
 ###################################################
 
-# to set a static key used for initial agent staging:
-#   STAGING_KEY = '8q=SDS%l5&Bpf?xIjKL8=Kk2RNwY(f*d'
+# Staging Key is set up via environmental variable
+# or via command line. By setting RANDOM a randomly
+# selected password will automatically be selected
+# or it can be set to any bash acceptable character
+# set for a password.
+
+STAGING_KEY = os.getenv('STAGING_KEY', "BLANK")
+punctuation = '!#$%&()*+,-./:;<=>?@[\]^_`{|}~'
 
 # otherwise prompt the user for a set value to hash for the negotiation password
-choice = raw_input("\n [>] Enter server negotiation password, enter for random generation: ")
-if choice == "":
-    # if no password is entered, generation something random
-    punctuation = '!#$%&()*+,-./:;<=>?@[\]^_`{|}~'
+if STAGING_KEY == "BLANK":
+    choice = raw_input("\n [>] Enter server negotiation password, enter for random generation: ")
+    if choice == "":
+        # if no password is entered, generation something random
+        STAGING_KEY = ''.join(random.sample(string.ascii_letters + string.digits + punctuation, 32))
+    else:
+        STAGING_KEY = hashlib.md5(choice).hexdigest()
+elif STAGING_KEY == "RANDOM":
     STAGING_KEY = ''.join(random.sample(string.ascii_letters + string.digits + punctuation, 32))
-else:
-    STAGING_KEY = hashlib.md5(choice).hexdigest()
 
 # the resource requested by the initial launcher
 STAGE0_URI = "index.asp"
@@ -61,9 +69,15 @@ IP_WHITELIST = ""
 #   format is 192.168.1.1,192.168.1.10-192.168.1.100,10.0.0.0/8
 IP_BLACKLIST = ""
 
-#number of times an agent will call back without an answer prior to exiting
+# number of times an agent will call back without an answer prior to exiting
 DEFAULT_LOST_LIMIT = 60 
 
+# default credentials used to log into the RESTful API
+API_USERNAME = "empireadmin"
+API_PASSWORD = ''.join(random.sample(string.ascii_letters + string.digits + punctuation, 32))
+
+# the 'permanent' API token (doesn't change)
+API_PERMANENT_TOKEN = ''.join(random.choice(string.ascii_lowercase + string.digits) for x in range(40))
 
 
 ###################################################
@@ -94,11 +108,17 @@ c.execute('''CREATE TABLE config (
     "server_version" text,
     "ip_whitelist" text,
     "ip_blacklist" text,
-    "default_lost_limit" integer
+    "default_lost_limit" integer,
+    "autorun_command" text,
+    "autorun_data" text,
+    "api_username" text,
+    "api_password" text,
+    "api_current_token" text,
+    "api_permanent_token" text
     )''')
 
 # kick off the config component of the database
-c.execute("INSERT INTO config VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (STAGING_KEY,STAGE0_URI,STAGE1_URI,STAGE2_URI,DEFAULT_DELAY,DEFAULT_JITTER,DEFAULT_PROFILE,DEFAULT_CERT_PATH,DEFAULT_PORT,INSTALL_PATH,SERVER_VERSION,IP_WHITELIST,IP_BLACKLIST, DEFAULT_LOST_LIMIT))
+c.execute("INSERT INTO config VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (STAGING_KEY,STAGE0_URI,STAGE1_URI,STAGE2_URI,DEFAULT_DELAY,DEFAULT_JITTER,DEFAULT_PROFILE,DEFAULT_CERT_PATH,DEFAULT_PORT,INSTALL_PATH,SERVER_VERSION,IP_WHITELIST,IP_BLACKLIST, DEFAULT_LOST_LIMIT, "", "", API_USERNAME, API_PASSWORD, "", API_PERMANENT_TOKEN))
 
 c.execute('''CREATE TABLE "agents" (
     "id" integer PRIMARY KEY,
@@ -129,7 +149,9 @@ c.execute('''CREATE TABLE "agents" (
     "kill_date" text,
     "working_hours" text,
     "ps_version" text,
-    "lost_limit" integer
+    "lost_limit" integer,
+    "taskings" text,
+    "results" text
     )''')
 
 c.execute('''CREATE TABLE "listeners" (

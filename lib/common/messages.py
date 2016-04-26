@@ -24,7 +24,7 @@ def title(version):
     """
     os.system('clear')
     print "===================================================================================="
-    print " Empire: PowerShell post-exploitation agent | [Version]: " + version
+    print " Empire: PowerShell post-exploitation agent | [Version]: %s" % (version)
     print '===================================================================================='
     print ' [Web]: https://www.PowerShellEmpire.com/ | [Twitter]: @harmj0y, @sixdub, @enigma0x3'
     print '===================================================================================='
@@ -113,6 +113,7 @@ def display_options(options, color=True):
         else:
             print "\t%s\t%s" % ('{0: <16}'.format(key), wrap_string(options[key]))
 
+
 def agent_print (agents):
     """
     Take an agent dictionary and display everything nicely.
@@ -123,7 +124,7 @@ def agent_print (agents):
     print "  ---------          -----------     ------------    ---------           -------             -----    --------------------"
 
     for agent in agents:
-        [ID, sessionID, listener, name, delay, jitter, external_ip, internal_ip, username, high_integrity, process_name, process_id, hostname, os_details, session_key, checkin_time, lastseen_time, parent, children, servers, uris, old_uris, user_agent, headers, functions, kill_date, working_hours, ps_version, lost_limit] = agent
+        [ID, sessionID, listener, name, delay, jitter, external_ip, internal_ip, username, high_integrity, process_name, process_id, hostname, os_details, session_key, checkin_time, lastseen_time, parent, children, servers, uris, old_uris, user_agent, headers, functions, kill_date, working_hours, ps_version, lost_limit, taskings, results] = agent
         if str(high_integrity) == "1":
             # add a * to the username if it's high integrity 
             username = "*" + username
@@ -131,13 +132,13 @@ def agent_print (agents):
 
     print ""
 
+
 def display_agents(agents):
 
     if len(agents)>0:
         agent_print(agents)
     else:
         print helpers.color("[!] No agents currently registered ")
-
 
 
 def display_staleagents(agents):
@@ -151,14 +152,6 @@ def display_staleagents(agents):
         print helpers.color("[!] No stale agents currently registered ")
 
 
-
-
-
-
-
-
-
-
 def display_agent(agent):
     """
     Display an agent all nice-like.
@@ -167,7 +160,7 @@ def display_agent(agent):
     """
 
     # extract out database fields.
-    keys = ["ID", "sessionID", "listener", "name", "delay", "jitter", "external_ip", "internal_ip", "username", "high_integrity", "process_name", "process_id", "hostname", "os_details", "session_key", "checkin_time", "lastseen_time", "parent", "children", "servers", "uris", "old_uris", "user_agent", "headers", "functions", "kill_date", "working_hours", "ps_version", "lost_limit"]
+    keys = ["ID", "sessionID", "listener", "name", "delay", "jitter", "external_ip", "internal_ip", "username", "high_integrity", "process_name", "process_id", "hostname", "os_details", "session_key", "checkin_time", "lastseen_time", "parent", "children", "servers", "uris", "old_uris", "user_agent", "headers", "functions", "kill_date", "working_hours", "ps_version", "lost_limit", "takings", "results"]
 
     print helpers.color("\n[*] Agent info:\n")
 
@@ -175,7 +168,7 @@ def display_agent(agent):
     agentInfo = dict(zip(keys, agent))
 
     for key in agentInfo:
-        if key != "functions":
+        if key != "functions" and key != "takings" and key != "results":
             print "\t%s\t%s" % (helpers.color('{0: <16}'.format(key), "blue"), wrap_string(agentInfo[key], width=70))
     print ""
 
@@ -382,13 +375,16 @@ def display_module(moduleName, module):
 
     # print out any options, if present
     if module.options:
+
+        # get the size for the first column
+        maxNameLen = len(max(module.options.keys(), key=len))
+
         print "\nOptions:\n"
-        print "  Name             Required    Value                     Description"
-        print "  ----             --------    -------                   -----------"
+        print "  %sRequired    Value                     Description" %('{:<{}s}'.format("Name", maxNameLen+1))
+        print "  %s--------    -------                   -----------" %('{:<{}s}'.format("----", maxNameLen+1))
 
         for option,values in module.options.iteritems():
-            # print "  %s%s%s%s" % ('{0: <17}'.format(option), '{0: <12}'.format(("True" if values['Required'] else "False")), '{0: <25}'.format(values['Value']), wrap_string(values['Description'], indent=56))
-            print "  %s%s%s" % ('{0: <17}'.format(str(option)), '{0: <12}'.format(("True" if values['Required'] else "False")), wrap_columns(str(values['Value']), str(values['Description'])))
+            print "  %s%s%s" % ('{:<{}s}'.format(str(option), maxNameLen+1), '{0: <12}'.format(("True" if values['Required'] else "False")), wrap_columns(str(values['Value']), str(values['Description']), indent=(31 + (maxNameLen-16))))
 
     print ""
     

